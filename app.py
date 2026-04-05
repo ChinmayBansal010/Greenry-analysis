@@ -8,6 +8,9 @@ from sklearn.svm import SVR
 from sklearn.preprocessing import StandardScaler
 from google.oauth2 import service_account
 import io
+import folium
+from folium.plugins import Draw
+from streamlit_folium import st_folium
 
 @st.cache_resource
 def init_ee():
@@ -155,9 +158,7 @@ class GreenAreaAnalyzer:
                 ax.spines['right'].set_visible(False)
                 
                 y_min, y_max = df['NDVI'].min(), df['NDVI'].max()
-                y_margin = (y_max - y_min) * 0.05
-                if y_margin == 0:
-                    y_margin = 0.01
+                y_margin = (y_max - y_min) * 0.05 if (y_max - y_min) != 0 else 0.01
                 ax.set_ylim(y_min - y_margin, y_max + y_margin)
 
                 ax2 = axs[1]
@@ -169,9 +170,7 @@ class GreenAreaAnalyzer:
                 ax2.spines['right'].set_visible(False)
                 
                 p_min, p_max = min(predictions), max(predictions)
-                p_margin = (p_max - p_min) * 0.05
-                if p_margin == 0:
-                    p_margin = 0.01
+                p_margin = (p_max - p_min) * 0.05 if (p_max - p_min) != 0 else 0.01
                 ax2.set_ylim(p_min - p_margin, p_max + p_margin)
 
                 plt.tight_layout()
@@ -211,22 +210,7 @@ def main():
     if not init_ee():
         st.stop()
 
-    st.sidebar.header("🌍 Location Settings")
-    loc_name = st.sidebar.text_input("Region Name", "Amazon Rainforest")
-    
-    col_lat1, col_lat2 = st.sidebar.columns(2)
-    min_lat = col_lat1.number_input("Min Lat", value=-3.5000, format="%.4f")
-    max_lat = col_lat2.number_input("Max Lat", value=-3.0000, format="%.4f")
-    
-    col_lon1, col_lon2 = st.sidebar.columns(2)
-    min_lon = col_lon1.number_input("Min Lon", value=-60.0000, format="%.4f")
-    max_lon = col_lon2.number_input("Max Lon", value=-59.5000, format="%.4f")
-
-    center_lat = (min_lat + max_lat) / 2
-    center_lon = (min_lon + max_lon) / 2
-    map_df = pd.DataFrame({'lat': [center_lat], 'lon': [center_lon]})
-    st.sidebar.map(map_df, zoom=6, use_container_width=True)
-
+    # SIDEBAR CONTROLS
     st.sidebar.header("📅 Timeframe")
     start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2019-01-01'))
     train_years = st.sidebar.slider("Training Horizon (Years)", 1, 10, 5)
@@ -237,7 +221,51 @@ def main():
         svr_eps = st.slider("Epsilon (Tolerance)", 0.01, 1.0, 0.1, 0.01)
         smooth_window = st.slider("Data Smoothing (Records)", 1, 10, 3)
 
-    if st.sidebar.button("🚀 Run Analysis", type="primary", use_container_width=True):
+    # MAIN UI: INTERACTIVE MAP
+    st.subheader("1. Select Region")
+    st.markdown("Use the **square icon** on the left side of the map to draw a rectangle over the area you want to analyze.")
+    
+    # Initialize a clean Folium map centered roughly on the Amazon
+    m = folium.Map(location=[-3.25, -59.75], zoom_start=6)
+    
+    # Add drawing tools (restrict to rectangles only for bounding box logic)
+    Draw(
+        export=False,
+        position='topleft',
+        draw_options={
+            'polyline': False,
+            'polygon': False,
+            'circle': False,
+            'marker': False,
+            'circlemarker': False,
+            'rectangle': True
+        }
+    ).add_to(m)
+
+    # Render the map in Streamlit and capture user interactions
+    st_data = st_folium(m, width=1200, height=400)
+    
+    # Extract coordinates if the user drew a rectangle
+    min_lat, max_lat, min_lon, max_lon = -3.50, -3.00, -60.00, -59.50 # Default Amazon Coords
+    loc_name = "Custom Drawn Region"
+    
+    if st_data.get("all_drawings"):
+        # The coordinates come back as a GeoJSON polygon ring
+        coords = st_data["all_drawings"][0]["geometry"]["coordinates"][0]
+        lons = [point[0] for point in coords]
+        lats = [point[1] for point in coords]
+        
+        min_lon, max_lon = min(lons), max(lons)
+        min_lat, max_lat = min(lats), max(lats)
+        st.success(f"Region Captured! Bounds: Lat ({min_lat:.3f} to {max_lat:.3f}), Lon ({min_lon:.3f} to {max_lon:.3f})")
+    else:
+        st.info("No box drawn yet. The default Amazon Rainforest coordinates will be used.")
+
+    st.markdown("---")
+    st.subheader("2. Run SVR Machine Learning Analysis")
+
+    # Run Analysis Button
+    if st.button("🚀 Analyze Selected Region", type="primary", use_container_width=True):
         locations = {
             loc_name: [min_lat, min_lon, max_lat, max_lon]
         }
