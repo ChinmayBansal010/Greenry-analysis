@@ -9,8 +9,6 @@ import io
 import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
-
-# Import Prophet instead of SVR
 from prophet import Prophet
 
 @st.cache_resource
@@ -34,8 +32,9 @@ def init_ee():
             st.error(f"Earth Engine Initialization failed: {e}")
             return False
 
+# Notice we added 'scale' to the cached function
 @st.cache_data(show_spinner=False)
-def fetch_ee_data_cached(coords, start_date, end_date):
+def fetch_ee_data_cached(coords, start_date, end_date, scale):
     area_of_interest = ee.Geometry.Rectangle([coords[1], coords[0], coords[3], coords[2]])
     collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                   .filterBounds(area_of_interest)
@@ -47,7 +46,7 @@ def fetch_ee_data_cached(coords, start_date, end_date):
         mean_dict = ndvi.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=area_of_interest,
-            scale=30,
+            scale=scale,  # Injecting the dynamic scale here
             maxPixels=1e13
         )
         return ee.Feature(None, {
@@ -59,7 +58,7 @@ def fetch_ee_data_cached(coords, start_date, end_date):
     
     try:
         info = ndvi_collection.getInfo()
-    except Exception:
+    except Exception as e:
         return pd.DataFrame()
 
     features = info.get('features', [])
@@ -78,18 +77,19 @@ def fetch_ee_data_cached(coords, start_date, end_date):
     return df
 
 class GreenAreaAnalyzer:
-    def __init__(self, locations, start_date, train_years=5, predict_years=2, flexibility=0.05, smooth_window=3):
+    def __init__(self, locations, start_date, train_years=5, predict_years=2, flexibility=0.05, smooth_window=3, scale=250):
         self.locations = locations
         self.start_date = start_date
         self.train_years = train_years
         self.predict_years = predict_years
         self.flexibility = flexibility
         self.smooth_window = smooth_window
+        self.scale = scale
 
     def analyze_sequential(self, start_date, end_date):
         results = {}
         for loc_name, coords in self.locations.items():
-            df = fetch_ee_data_cached(tuple(coords), start_date, end_date)
+            df = fetch_ee_data_cached(tuple(coords), start_date, end_date, self.scale)
             if df.empty:
                 st.warning(f"No images found for {loc_name} in the given date range.")
             results[loc_name] = df
@@ -100,7 +100,7 @@ class GreenAreaAnalyzer:
         train_end_dt = self.start_date + pd.DateOffset(years=self.train_years)
         train_end_date = train_end_dt.strftime('%Y-%m-%d')
 
-        with st.status("Querying Earth Engine...", expanded=True) as status:
+        with st.status(f"Querying Earth Engine at {self.scale}m resolution...", expanded=True) as status:
             st.write(f"Fetching Sentinel-2 harmonized data from {train_start_date} to {train_end_date}...")
             results = self.analyze_sequential(train_start_date, train_end_date)
             status.update(label="Data processing complete!", state="complete", expanded=False)
@@ -110,7 +110,6 @@ class GreenAreaAnalyzer:
                 st.error(f"No data available for {name}.")
                 continue
 
-            # Smooth data to remove extreme cloud anomalies
             df['NDVI_Smooth'] = df['NDVI'].rolling(window=self.smooth_window, min_periods=1).mean()
             
             st.markdown("### 📊 Region Summary & Analytics")
@@ -120,14 +119,8 @@ class GreenAreaAnalyzer:
             col3.metric("Min NDVI", f"{df['NDVI'].min():.4f}")
             col4.metric("Data Points", f"{len(df)}")
 
-            # ---------------------------------------------------------
-            # PROPHET FORECASTING LOGIC
-            # ---------------------------------------------------------
-            # Prophet requires columns specifically named 'ds' (datestamp) and 'y' (value)
             df_prophet = df[['Date', 'NDVI_Smooth']].rename(columns={'Date': 'ds', 'NDVI_Smooth': 'y'})
             
-            # Initialize Prophet Model
-            # changepoint_prior_scale controls how flexible the trend line is.
             m = Prophet(
                 changepoint_prior_scale=self.flexibility, 
                 yearly_seasonality=True, 
@@ -136,11 +129,9 @@ class GreenAreaAnalyzer:
             )
             m.fit(df_prophet)
 
-            # Create dataframe for future predictions (Monthly frequency)
             future = m.make_future_dataframe(periods=self.predict_years * 12, freq='ME')
             forecast = m.predict(future)
 
-            # Calculate overall future trend mathematically
             future_only = forecast[forecast['ds'] > train_end_date]
             if len(future_only) > 1:
                 trend_diff = future_only['yhat'].iloc[-1] - future_only['yhat'].iloc[0]
@@ -153,18 +144,15 @@ class GreenAreaAnalyzer:
             tab1, tab2 = st.tabs(["📈 Prophet Forecast & Seasonality", "🗄️ Raw Data Extract"])
 
             with tab1:
-                # Plot 1: Main Forecast Plot
                 fig = m.plot(forecast, figsize=(14, 6))
                 ax = fig.gca()
                 ax.set_title(f'NDVI Forecast - {name} (Prophet Model)', fontsize=16, pad=15)
                 ax.set_xlabel('Date', fontsize=12)
                 ax.set_ylabel('NDVI Value', fontsize=12)
                 
-                # Add a vertical line to separate historical data from future prediction
                 ax.axvline(pd.to_datetime(train_end_date), color='red', linestyle='--', alpha=0.6, label='Prediction Start')
                 ax.legend()
                 
-                # Stretch Y-axis dynamically
                 y_min = forecast['yhat_lower'].min()
                 y_max = forecast['yhat_upper'].max()
                 ax.set_ylim(y_min - 0.02, y_max + 0.02)
@@ -183,16 +171,13 @@ class GreenAreaAnalyzer:
                 st.markdown("---")
                 st.markdown("#### 🔄 Seasonal Breakdown")
                 st.markdown("This chart isolates the overall trend from the yearly repeating wet/dry season cycle.")
-                # Plot 2: Prophet Components (Trend + Yearly Seasonality)
                 fig_comp = m.plot_components(forecast, figsize=(14, 6))
                 st.pyplot(fig_comp)
 
             with tab2:
-                # Merge original data with forecast data for a complete CSV download
                 export_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].rename(columns={
                     'ds': 'Date', 'yhat': 'Predicted_NDVI', 'yhat_lower': 'Lower_Confidence', 'yhat_upper': 'Upper_Confidence'
                 })
-                # Join with actual historical data where available
                 export_df = pd.merge(export_df, df[['Date', 'NDVI']], on='Date', how='left')
                 
                 st.dataframe(export_df, use_container_width=True)
@@ -213,24 +198,36 @@ def main():
     with col_icon:
         st.image("https://upload.wikimedia.org/wikipedia/commons/e/e8/Copernicus_logo.svg", width=60)
     
-    st.markdown("Analyze historical Sentinel-2 satellite imagery and forecast future vegetation trends using Facebook Prophet.")
+    st.markdown("Analyze historical Sentinel-2 satellite imagery and forecast future vegetation trends.")
     st.markdown("---")
     
     if not init_ee():
         st.stop()
 
-    # SIDEBAR CONTROLS
-    st.sidebar.header("📅 Timeframe")
+    st.sidebar.header("📅 Timeframe & Speed")
     start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2019-01-01'))
     train_years = st.sidebar.slider("Training Horizon (Years)", 1, 10, 5)
     predict_years = st.sidebar.slider("Forecast Horizon (Years)", 1, 5, 2)
+    
+    # NEW SPEED CONTROL
+    scale_options = {
+        500: "500m/pixel (Very Fast)",
+        250: "250m/pixel (Fast)",
+        100: "100m/pixel (Balanced)",
+        30: "30m/pixel (Very Slow - Max Detail)"
+    }
+    selected_scale = st.sidebar.selectbox(
+        "Processing Speed (Resolution)", 
+        options=list(scale_options.keys()), 
+        format_func=lambda x: scale_options[x],
+        index=1 # Defaults to 250m
+    )
 
     with st.sidebar.expander("⚙️ Prophet Model Settings"):
         st.markdown("*Adjust how strictly the model follows trend changes.*")
         flexibility = st.slider("Trend Flexibility", 0.001, 0.500, 0.050, 0.010)
         smooth_window = st.slider("Pre-Smoothing (Records)", 1, 10, 3)
 
-    # MAIN UI: INTERACTIVE MAP
     st.subheader("1. Select Region")
     st.markdown("Use the **square icon** on the left side of the map to draw a rectangle over the area you want to analyze.")
     
@@ -289,7 +286,8 @@ def main():
             train_years=train_years, 
             predict_years=predict_years,
             flexibility=flexibility,
-            smooth_window=smooth_window
+            smooth_window=smooth_window,
+            scale=selected_scale # Pass the selected scale to the analyzer
         )
         analyzer.plot_and_predict()
 
