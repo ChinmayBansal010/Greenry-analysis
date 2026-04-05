@@ -77,11 +77,12 @@ def fetch_ee_data_cached(coords, start_date, end_date):
     return df
 
 class GreenAreaAnalyzer:
-    def __init__(self, locations, start_date, train_years=5, predict_years=2, svr_c=1.0, svr_eps=0.1, smooth_window=3):
+    def __init__(self, locations, start_date, train_years=5, predict_years=2, svr_kernel='linear', svr_c=1.0, svr_eps=0.1, smooth_window=3):
         self.locations = locations
         self.start_date = start_date
         self.train_years = train_years
         self.predict_years = predict_years
+        self.svr_kernel = svr_kernel
         self.svr_c = svr_c
         self.svr_eps = svr_eps
         self.smooth_window = smooth_window
@@ -107,7 +108,7 @@ class GreenAreaAnalyzer:
             results = self.analyze_sequential(train_start_date, train_end_date)
             status.update(label="Data processing complete!", state="complete", expanded=False)
         
-        regressor = SVR(C=self.svr_c, epsilon=self.svr_eps)
+        regressor = SVR(kernel=self.svr_kernel, C=self.svr_c, epsilon=self.svr_eps)
 
         for name, df in results.items():
             if df.empty:
@@ -168,10 +169,11 @@ class GreenAreaAnalyzer:
                 ax.spines['right'].set_visible(False)
                 
                 y_min, y_max = df['NDVI'].min(), df['NDVI'].max()
-                if y_min == y_max:
-                    ax.set_ylim(y_min - 0.01, y_max + 0.01)
+                if np.isclose(y_min, y_max):
+                    ax.set_ylim(y_min - 0.0001, y_max + 0.0001)
                 else:
                     ax.set_ylim(y_min, y_max)
+                ax.margins(y=0)
 
                 ax2 = axs[1]
                 line_color = 'forestgreen' if future_trend == 'Increasing' else 'crimson'
@@ -182,10 +184,11 @@ class GreenAreaAnalyzer:
                 ax2.spines['right'].set_visible(False)
                 
                 p_min, p_max = min(predictions), max(predictions)
-                if p_min == p_max:
-                    ax2.set_ylim(p_min - 0.01, p_max + 0.01)
+                if np.isclose(p_min, p_max):
+                    ax2.set_ylim(p_min - 0.0001, p_max + 0.0001)
                 else:
                     ax2.set_ylim(p_min, p_max)
+                ax2.margins(y=0)
 
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -230,6 +233,7 @@ def main():
     predict_years = st.sidebar.slider("Forecast Horizon (Years)", 1, 5, 2)
 
     with st.sidebar.expander("⚙️ Advanced SVR & Data Settings"):
+        svr_kernel = st.selectbox("Kernel Type", ['linear', 'rbf', 'poly', 'sigmoid'], index=0)
         svr_c = st.slider("C (Regularization)", 0.1, 10.0, 1.0, 0.1)
         svr_eps = st.slider("Epsilon (Tolerance)", 0.01, 1.0, 0.1, 0.01)
         smooth_window = st.slider("Data Smoothing (Records)", 1, 10, 3)
@@ -291,6 +295,7 @@ def main():
             start_date=start_date, 
             train_years=train_years, 
             predict_years=predict_years,
+            svr_kernel=svr_kernel,
             svr_c=svr_c,
             svr_eps=svr_eps,
             smooth_window=smooth_window
