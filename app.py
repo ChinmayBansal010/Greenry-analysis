@@ -2,6 +2,7 @@ import streamlit as st
 import ee
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from datetime import datetime
 from google.oauth2 import service_account
 import io
@@ -402,7 +403,8 @@ def main():
     st.markdown("<h3 class='gradient-text'>1. Select Region</h3>", unsafe_allow_html=True)
     st.markdown("Use the **square icon** on the left side of the map to draw a rectangle over the area you want to analyze.")
     
-    m = folium.Map(location=[-3.25, -59.75], zoom_start=6, tiles="CartoDB dark_matter")
+    # REMOVED: tiles="CartoDB dark_matter" to restore colorful default map
+    m = folium.Map(location=[-3.25, -59.75], zoom_start=6)
     
     Draw(
         export=False,
