@@ -33,6 +33,49 @@ def init_ee():
             st.error(f"Earth Engine Initialization failed: {e}")
             return False
 
+@st.cache_data(show_spinner=False)
+def fetch_ee_data_cached(coords, start_date, end_date):
+    area_of_interest = ee.Geometry.Rectangle([coords[1], coords[0], coords[3], coords[2]])
+    collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterBounds(area_of_interest)
+                  .filterDate(start_date, end_date)
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)))
+
+    def calculate_ndvi(image):
+        ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
+        mean_dict = ndvi.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=area_of_interest,
+            scale=30,
+            maxPixels=1e13
+        )
+        return ee.Feature(None, {
+            'NDVI': mean_dict.get('NDVI'),
+            'system:time_start': image.get('system:time_start')
+        })
+
+    ndvi_collection = collection.map(calculate_ndvi)
+    
+    try:
+        info = ndvi_collection.getInfo()
+    except Exception:
+        return pd.DataFrame()
+
+    features = info.get('features', [])
+    dates = []
+    ndvi_values = []
+    for f in features:
+        props = f.get('properties', {})
+        val = props.get('NDVI')
+        t = props.get('system:time_start')
+        if val is not None and t is not None:
+            dates.append(datetime.fromtimestamp(t / 1000.0))
+            ndvi_values.append(val)
+
+    df = pd.DataFrame({'Date': dates, 'NDVI': ndvi_values})
+    df = df.sort_values('Date').reset_index(drop=True)
+    return df
+
 class GreenAreaAnalyzer:
     def __init__(self, locations, start_date, train_years=5, predict_years=2, svr_c=1.0, svr_eps=0.1, smooth_window=3):
         self.locations = locations
@@ -43,46 +86,13 @@ class GreenAreaAnalyzer:
         self.svr_eps = svr_eps
         self.smooth_window = smooth_window
 
-    def fetch_and_calculate_ndvi(self, name, coords, start_date, end_date):
-        area_of_interest = ee.Geometry.Rectangle([coords[1], coords[0], coords[3], coords[2]])
-        collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                      .filterBounds(area_of_interest)
-                      .filterDate(start_date, end_date)
-                      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
-                      .select(['B8', 'B4']))
-        images = collection.toList(collection.size()).getInfo()
-
-        if len(images) == 0:
-            st.warning(f"No images found for {name} in the given date range.")
-            return name, pd.DataFrame()
-
-        ndvi_values, dates = [], []
-        for image_info in images:
-            image = ee.Image(image_info['id'])
-            timestamp = image_info['properties']['system:time_start'] / 1000
-            date = datetime.fromtimestamp(timestamp)
-            ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
-            result = ndvi.reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=area_of_interest,
-                scale=30,
-                maxPixels=1e13
-            ).getInfo()
-            
-            ndvi_value = result.get('NDVI')
-            if ndvi_value is not None:
-                ndvi_values.append(float(ndvi_value))
-                dates.append(date)
-
-        df = pd.DataFrame({'Date': dates, 'NDVI': ndvi_values})
-        df = df.sort_values('Date').reset_index(drop=True)
-        return name, df
-
     def analyze_sequential(self, start_date, end_date):
         results = {}
-        for loc in self.locations.items():
-            name, data = self.fetch_and_calculate_ndvi(loc[0], loc[1], start_date, end_date)
-            results[name] = data
+        for loc_name, coords in self.locations.items():
+            df = fetch_ee_data_cached(tuple(coords), start_date, end_date)
+            if df.empty:
+                st.warning(f"No images found for {loc_name} in the given date range.")
+            results[loc_name] = df
         return results
 
     def plot_and_predict(self):
@@ -157,7 +167,6 @@ class GreenAreaAnalyzer:
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
                 
-                # STRETCH HISTORICAL GRAPH TO ABSOLUTE MIN/MAX
                 y_min, y_max = df['NDVI'].min(), df['NDVI'].max()
                 if y_min == y_max:
                     ax.set_ylim(y_min - 0.01, y_max + 0.01)
@@ -172,7 +181,6 @@ class GreenAreaAnalyzer:
                 ax2.spines['top'].set_visible(False)
                 ax2.spines['right'].set_visible(False)
                 
-                # STRETCH FORECAST GRAPH TO ABSOLUTE MIN/MAX
                 p_min, p_max = min(predictions), max(predictions)
                 if p_min == p_max:
                     ax2.set_ylim(p_min - 0.01, p_max + 0.01)
@@ -216,7 +224,6 @@ def main():
     if not init_ee():
         st.stop()
 
-    # SIDEBAR CONTROLS
     st.sidebar.header("📅 Timeframe")
     start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2019-01-01'))
     train_years = st.sidebar.slider("Training Horizon (Years)", 1, 10, 5)
@@ -227,14 +234,11 @@ def main():
         svr_eps = st.slider("Epsilon (Tolerance)", 0.01, 1.0, 0.1, 0.01)
         smooth_window = st.slider("Data Smoothing (Records)", 1, 10, 3)
 
-    # MAIN UI: INTERACTIVE MAP
     st.subheader("1. Select Region")
     st.markdown("Use the **square icon** on the left side of the map to draw a rectangle over the area you want to analyze.")
     
-    # Initialize a clean Folium map centered roughly on the Amazon
     m = folium.Map(location=[-3.25, -59.75], zoom_start=6)
     
-    # Add drawing tools (restrict to rectangles only for bounding box logic)
     Draw(
         export=False,
         position='topleft',
@@ -248,15 +252,17 @@ def main():
         }
     ).add_to(m)
 
-    # Render the map in Streamlit and capture user interactions
-    st_data = st_folium(m, width=1200, height=400)
+    st_data = st_folium(
+        m, 
+        width=1200, 
+        height=400, 
+        returned_objects=["all_drawings"] 
+    )
     
-    # Extract coordinates if the user drew a rectangle
-    min_lat, max_lat, min_lon, max_lon = -3.50, -3.00, -60.00, -59.50 # Default Amazon Coords
+    min_lat, max_lat, min_lon, max_lon = -3.50, -3.00, -60.00, -59.50
     loc_name = "Custom Drawn Region"
     
     if st_data.get("all_drawings"):
-        # The coordinates come back as a GeoJSON polygon ring
         coords = st_data["all_drawings"][0]["geometry"]["coordinates"][0]
         lons = [point[0] for point in coords]
         lats = [point[1] for point in coords]
@@ -270,8 +276,13 @@ def main():
     st.markdown("---")
     st.subheader("2. Run SVR Machine Learning Analysis")
 
-    # Run Analysis Button
+    if "run_analysis" not in st.session_state:
+        st.session_state.run_analysis = False
+
     if st.button("🚀 Analyze Selected Region", type="primary", use_container_width=True):
+        st.session_state.run_analysis = True
+
+    if st.session_state.run_analysis:
         locations = {
             loc_name: [min_lat, min_lon, max_lat, max_lon]
         }
