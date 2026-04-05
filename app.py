@@ -157,9 +157,12 @@ class GreenAreaAnalyzer:
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
                 
+                # STRETCH HISTORICAL GRAPH TO ABSOLUTE MIN/MAX
                 y_min, y_max = df['NDVI'].min(), df['NDVI'].max()
-                y_margin = (y_max - y_min) * 0.05 if (y_max - y_min) != 0 else 0.01
-                ax.set_ylim(y_min - y_margin, y_max + y_margin)
+                if y_min == y_max:
+                    ax.set_ylim(y_min - 0.01, y_max + 0.01)
+                else:
+                    ax.set_ylim(y_min, y_max)
 
                 ax2 = axs[1]
                 line_color = 'forestgreen' if future_trend == 'Increasing' else 'crimson'
@@ -169,9 +172,12 @@ class GreenAreaAnalyzer:
                 ax2.spines['top'].set_visible(False)
                 ax2.spines['right'].set_visible(False)
                 
+                # STRETCH FORECAST GRAPH TO ABSOLUTE MIN/MAX
                 p_min, p_max = min(predictions), max(predictions)
-                p_margin = (p_max - p_min) * 0.05 if (p_max - p_min) != 0 else 0.01
-                ax2.set_ylim(p_min - p_margin, p_max + p_margin)
+                if p_min == p_max:
+                    ax2.set_ylim(p_min - 0.01, p_max + 0.01)
+                else:
+                    ax2.set_ylim(p_min, p_max)
 
                 plt.tight_layout()
                 st.pyplot(fig)
