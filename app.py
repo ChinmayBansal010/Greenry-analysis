@@ -4,13 +4,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
-from sklearn.svm import SVR
-from sklearn.preprocessing import StandardScaler
 from google.oauth2 import service_account
 import io
 import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
+
+# Import Prophet instead of SVR
+from prophet import Prophet
 
 @st.cache_resource
 def init_ee():
@@ -77,14 +78,12 @@ def fetch_ee_data_cached(coords, start_date, end_date):
     return df
 
 class GreenAreaAnalyzer:
-    def __init__(self, locations, start_date, train_years=5, predict_years=2, svr_kernel='linear', svr_c=1.0, svr_eps=0.1, smooth_window=3):
+    def __init__(self, locations, start_date, train_years=5, predict_years=2, flexibility=0.05, smooth_window=3):
         self.locations = locations
         self.start_date = start_date
         self.train_years = train_years
         self.predict_years = predict_years
-        self.svr_kernel = svr_kernel
-        self.svr_c = svr_c
-        self.svr_eps = svr_eps
+        self.flexibility = flexibility
         self.smooth_window = smooth_window
 
     def analyze_sequential(self, start_date, end_date):
@@ -100,27 +99,20 @@ class GreenAreaAnalyzer:
         train_start_date = self.start_date.strftime('%Y-%m-%d')
         train_end_dt = self.start_date + pd.DateOffset(years=self.train_years)
         train_end_date = train_end_dt.strftime('%Y-%m-%d')
-        predict_end_dt = train_end_dt + pd.DateOffset(years=self.predict_years)
-        predict_end_date = predict_end_dt.strftime('%Y-%m-%d')
 
         with st.status("Querying Earth Engine...", expanded=True) as status:
             st.write(f"Fetching Sentinel-2 harmonized data from {train_start_date} to {train_end_date}...")
             results = self.analyze_sequential(train_start_date, train_end_date)
             status.update(label="Data processing complete!", state="complete", expanded=False)
-        
-        regressor = SVR(kernel=self.svr_kernel, C=self.svr_c, epsilon=self.svr_eps)
 
         for name, df in results.items():
             if df.empty:
                 st.error(f"No data available for {name}.")
                 continue
 
-            df['Timestamp'] = pd.to_datetime(df['Date']).astype('int64') / 10**9
+            # Smooth data to remove extreme cloud anomalies
             df['NDVI_Smooth'] = df['NDVI'].rolling(window=self.smooth_window, min_periods=1).mean()
             
-            X = df['Timestamp'].values.reshape(-1, 1)
-            y = df['NDVI_Smooth'].values.reshape(-1, 1)
-
             st.markdown("### 📊 Region Summary & Analytics")
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Average NDVI", f"{df['NDVI'].mean():.4f}")
@@ -128,87 +120,87 @@ class GreenAreaAnalyzer:
             col3.metric("Min NDVI", f"{df['NDVI'].min():.4f}")
             col4.metric("Data Points", f"{len(df)}")
 
-            scaler_X = StandardScaler()
-            scaler_y = StandardScaler()
-            X_scaled = scaler_X.fit_transform(X)
-            y_scaled = scaler_y.fit_transform(y)
-
-            future_dates = pd.date_range(start=train_end_date, end=predict_end_date, freq='ME')
-            future_timestamps = (future_dates - pd.Timestamp("1970-01-01")) // pd.Timedelta('1s')
-            future_timestamps = np.array(future_timestamps).reshape(-1, 1)
-            future_timestamps_scaled = scaler_X.transform(future_timestamps)
-
-            z = np.polyfit(X.flatten(), y.flatten(), 1)
-            train_trend = 'Increasing 📈' if z[0] > 0 else 'Decreasing 📉'
+            # ---------------------------------------------------------
+            # PROPHET FORECASTING LOGIC
+            # ---------------------------------------------------------
+            # Prophet requires columns specifically named 'ds' (datestamp) and 'y' (value)
+            df_prophet = df[['Date', 'NDVI_Smooth']].rename(columns={'Date': 'ds', 'NDVI_Smooth': 'y'})
             
-            st.info(f"🌿 Historical Greenery Trend for **{name}**: **{train_trend}**")
+            # Initialize Prophet Model
+            # changepoint_prior_scale controls how flexible the trend line is.
+            m = Prophet(
+                changepoint_prior_scale=self.flexibility, 
+                yearly_seasonality=True, 
+                weekly_seasonality=False, 
+                daily_seasonality=False
+            )
+            m.fit(df_prophet)
 
-            regressor.fit(X_scaled, y_scaled.ravel())
-            
-            fitted = scaler_y.inverse_transform(regressor.predict(X_scaled).reshape(-1, 1)).flatten()
-            predictions_scaled = regressor.predict(future_timestamps_scaled)
-            predictions = scaler_y.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
-            
-            pred_z = np.polyfit(future_timestamps.flatten(), predictions.flatten(), 1)
-            future_trend = 'Increasing' if pred_z[0] > 0 else 'Decreasing'
+            # Create dataframe for future predictions (Monthly frequency)
+            future = m.make_future_dataframe(periods=self.predict_years * 12, freq='ME')
+            forecast = m.predict(future)
 
-            tab1, tab2 = st.tabs(["📈 Visualization & Forecast", "🗄️ Raw Data Extract"])
+            # Calculate overall future trend mathematically
+            future_only = forecast[forecast['ds'] > train_end_date]
+            if len(future_only) > 1:
+                trend_diff = future_only['yhat'].iloc[-1] - future_only['yhat'].iloc[0]
+                future_trend = 'Increasing 📈' if trend_diff > 0 else 'Decreasing 📉'
+            else:
+                future_trend = 'Stable'
+
+            st.info(f"🌿 Prophet Forecasted Trend for **{name}**: **{future_trend}**")
+
+            tab1, tab2 = st.tabs(["📈 Prophet Forecast & Seasonality", "🗄️ Raw Data Extract"])
 
             with tab1:
-                fig, axs = plt.subplots(1, 2, figsize=(20, 6), gridspec_kw={'width_ratios': [1.5, 1]})
-
-                ax = axs[0]
-                ax.scatter(df['Date'], df['NDVI'], color='lightgray', label='Raw NDVI', s=20, alpha=0.6)
-                ax.scatter(df['Date'], df['NDVI_Smooth'], color='royalblue', label=f'Smoothed ({self.smooth_window}-pt)', s=30)
-                ax.plot(df['Date'], fitted, color='darkorange', label='SVR Model Fit', linewidth=2)
-                ax.set_title(f'Historical Fit - {name}', fontsize=14, pad=15)
-                ax.set_ylabel('NDVI Value')
-                ax.legend(loc='upper right')
-                ax.grid(True, linestyle='--', alpha=0.7)
-                ax.spines['top'].set_visible(False)
-                ax.spines['right'].set_visible(False)
+                # Plot 1: Main Forecast Plot
+                fig = m.plot(forecast, figsize=(14, 6))
+                ax = fig.gca()
+                ax.set_title(f'NDVI Forecast - {name} (Prophet Model)', fontsize=16, pad=15)
+                ax.set_xlabel('Date', fontsize=12)
+                ax.set_ylabel('NDVI Value', fontsize=12)
                 
-                y_min, y_max = df['NDVI'].min(), df['NDVI'].max()
-                if np.isclose(y_min, y_max):
-                    ax.set_ylim(y_min - 0.0001, y_max + 0.0001)
-                else:
-                    ax.set_ylim(y_min, y_max)
-                ax.margins(y=0)
-
-                ax2 = axs[1]
-                line_color = 'forestgreen' if future_trend == 'Increasing' else 'crimson'
-                ax2.plot(future_dates, predictions, color=line_color, marker='o', markersize=4, linewidth=2, label='Forecast')
-                ax2.set_title(f'SVR Forecast ({future_trend})', fontsize=14, pad=15)
-                ax2.grid(True, linestyle='--', alpha=0.7)
-                ax2.spines['top'].set_visible(False)
-                ax2.spines['right'].set_visible(False)
+                # Add a vertical line to separate historical data from future prediction
+                ax.axvline(pd.to_datetime(train_end_date), color='red', linestyle='--', alpha=0.6, label='Prediction Start')
+                ax.legend()
                 
-                p_min, p_max = min(predictions), max(predictions)
-                if np.isclose(p_min, p_max):
-                    ax2.set_ylim(p_min - 0.0001, p_max + 0.0001)
-                else:
-                    ax2.set_ylim(p_min, p_max)
-                ax2.margins(y=0)
-
-                plt.tight_layout()
+                # Stretch Y-axis dynamically
+                y_min = forecast['yhat_lower'].min()
+                y_max = forecast['yhat_upper'].max()
+                ax.set_ylim(y_min - 0.02, y_max + 0.02)
+                
                 st.pyplot(fig)
                 
                 buf = io.BytesIO()
                 fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
                 st.download_button(
-                    label="🖼️ Download High-Res Plot",
+                    label="🖼️ Download Forecast Plot",
                     data=buf.getvalue(),
-                    file_name=f"{name}_forecast.png",
+                    file_name=f"{name}_prophet_forecast.png",
                     mime="image/png"
                 )
 
+                st.markdown("---")
+                st.markdown("#### 🔄 Seasonal Breakdown")
+                st.markdown("This chart isolates the overall trend from the yearly repeating wet/dry season cycle.")
+                # Plot 2: Prophet Components (Trend + Yearly Seasonality)
+                fig_comp = m.plot_components(forecast, figsize=(14, 6))
+                st.pyplot(fig_comp)
+
             with tab2:
-                st.dataframe(df[['Date', 'NDVI', 'NDVI_Smooth']], use_container_width=True)
-                csv_data = df[['Date', 'NDVI', 'NDVI_Smooth']].to_csv(index=False).encode('utf-8')
+                # Merge original data with forecast data for a complete CSV download
+                export_df = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].rename(columns={
+                    'ds': 'Date', 'yhat': 'Predicted_NDVI', 'yhat_lower': 'Lower_Confidence', 'yhat_upper': 'Upper_Confidence'
+                })
+                # Join with actual historical data where available
+                export_df = pd.merge(export_df, df[['Date', 'NDVI']], on='Date', how='left')
+                
+                st.dataframe(export_df, use_container_width=True)
+                csv_data = export_df.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 Download Dataset (CSV)",
+                    label="📥 Download Forecast Dataset (CSV)",
                     data=csv_data,
-                    file_name=f"{name}_ndvi_data.csv",
+                    file_name=f"{name}_prophet_data.csv",
                     mime="text/csv",
                 )
 
@@ -221,23 +213,24 @@ def main():
     with col_icon:
         st.image("https://upload.wikimedia.org/wikipedia/commons/e/e8/Copernicus_logo.svg", width=60)
     
-    st.markdown("Analyze historical Sentinel-2 satellite imagery and forecast future vegetation trends.")
+    st.markdown("Analyze historical Sentinel-2 satellite imagery and forecast future vegetation trends using Facebook Prophet.")
     st.markdown("---")
     
     if not init_ee():
         st.stop()
 
+    # SIDEBAR CONTROLS
     st.sidebar.header("📅 Timeframe")
     start_date = st.sidebar.date_input("Start Date", pd.to_datetime('2019-01-01'))
     train_years = st.sidebar.slider("Training Horizon (Years)", 1, 10, 5)
     predict_years = st.sidebar.slider("Forecast Horizon (Years)", 1, 5, 2)
 
-    with st.sidebar.expander("⚙️ Advanced SVR & Data Settings"):
-        svr_kernel = st.selectbox("Kernel Type", ['linear', 'rbf', 'poly', 'sigmoid'], index=0)
-        svr_c = st.slider("C (Regularization)", 0.1, 10.0, 1.0, 0.1)
-        svr_eps = st.slider("Epsilon (Tolerance)", 0.01, 1.0, 0.1, 0.01)
-        smooth_window = st.slider("Data Smoothing (Records)", 1, 10, 3)
+    with st.sidebar.expander("⚙️ Prophet Model Settings"):
+        st.markdown("*Adjust how strictly the model follows trend changes.*")
+        flexibility = st.slider("Trend Flexibility", 0.001, 0.500, 0.050, 0.010)
+        smooth_window = st.slider("Pre-Smoothing (Records)", 1, 10, 3)
 
+    # MAIN UI: INTERACTIVE MAP
     st.subheader("1. Select Region")
     st.markdown("Use the **square icon** on the left side of the map to draw a rectangle over the area you want to analyze.")
     
@@ -278,7 +271,7 @@ def main():
         st.info("No box drawn yet. The default Amazon Rainforest coordinates will be used.")
 
     st.markdown("---")
-    st.subheader("2. Run SVR Machine Learning Analysis")
+    st.subheader("2. Run Prophet Forecast Analysis")
 
     if "run_analysis" not in st.session_state:
         st.session_state.run_analysis = False
@@ -295,9 +288,7 @@ def main():
             start_date=start_date, 
             train_years=train_years, 
             predict_years=predict_years,
-            svr_kernel=svr_kernel,
-            svr_c=svr_c,
-            svr_eps=svr_eps,
+            flexibility=flexibility,
             smooth_window=smooth_window
         )
         analyzer.plot_and_predict()

@@ -3,7 +3,7 @@ earthengine-api
 numpy
 pandas
 matplotlib
-scikit-learn
+prophet
 google-auth
 folium
 streamlit-folium
