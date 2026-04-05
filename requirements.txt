@@ -1,0 +1,7 @@
+streamlit
+earthengine-api
+numpy
+pandas
+matplotlib
+scikit-learn
+google-auth
