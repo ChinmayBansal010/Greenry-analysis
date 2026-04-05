@@ -7,3 +7,4 @@ prophet
 google-auth
 folium
 streamlit-folium
+plotly
