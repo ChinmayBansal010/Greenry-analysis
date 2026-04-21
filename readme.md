@@ -1,6 +1,6 @@
 
 # 🌿 Greenery Analysis Using NDVI and Machine Learning
-
+https://greenry-analysis-fpjksijr9n8od7cngetyd2.streamlit.app/
 ## 🌍 Overview
 
 This project leverages **Artificial Intelligence (AI)** and **satellite imagery** to analyze and predict vegetation health using the **Normalized Difference Vegetation Index (NDVI)**. By integrating **Google Earth Engine** with multiple **machine learning models**, it forecasts future greenery trends across defined geospatial regions.
