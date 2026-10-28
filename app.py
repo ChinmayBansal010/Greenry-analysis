@@ -403,7 +403,6 @@ def main():
     st.markdown("<h3 class='gradient-text'>1. Select Region</h3>", unsafe_allow_html=True)
     st.markdown("Use the **square icon** on the left side of the map to draw a rectangle over the area you want to analyze.")
     
-    # REMOVED: tiles="CartoDB dark_matter" to restore colorful default map
     m = folium.Map(location=[-3.25, -59.75], zoom_start=6)
     
     Draw(
